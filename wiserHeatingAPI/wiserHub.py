@@ -36,7 +36,7 @@ TEMP_MINIMUM = 5
 TEMP_MAXIMUM = 30
 TEMP_OFF = -20
 
-TIMEOUT = 5
+TIMEOUT = 10
 
 __VERSION__ = "1.0.7.2"
 
@@ -194,13 +194,14 @@ class wiserHub:
                 _LOGGER.warning("Wiser found no rooms")
 
             # The Wiser Heat Hub can return invalid JSON, so remove all non-printable characters before trying to parse JSON
-            responseContent = requests.get(
-                WISERNETWORKURL.format(self.hubIP),
-                headers=self.headers,
-                timeout=TIMEOUT,
-            ).content
-            responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
-            self.wiserNetworkData = json.loads(responseContent)
+            if self.wiserNetworkData is None:
+                responseContent = requests.get(
+                    WISERNETWORKURL.format(self.hubIP),
+                    headers=self.headers,
+                    timeout=TIMEOUT,
+                ).content
+                responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
+                self.wiserNetworkData = json.loads(responseContent)
 
         except requests.Timeout:
             _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
