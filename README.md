@@ -75,4 +75,4 @@ Documentation available in [docs](docs) directory and within comments in the cod
 * Merged [pull17](https://github.com/asantaga/wiserheatingapi/pull/17), Enhancement to detect invalid JSON from the hub, thanks @TobyLL!  fixed bug in getSmartplug state not working correctly
 
 1.0.8
-* Add retry functionality
+* Add retry functionality for hub
