@@ -22,7 +22,8 @@ for lines in data:
     if line[0] == "wiserhubip":
         wiserip = line[1]
 
-print(" Wiser Hub IP= {} , WiserKey= {}".format(wiserip, wiserkey))
+print()
+print(" Wiser Hub IP = {} , WiserKey = {}".format(wiserip, wiserkey))
 
 
 try:
@@ -104,7 +105,7 @@ try:
     for scheduleRoomTest in wh.getRooms():
         smartValves = scheduleRoomTest.get("SmartValveIds")
         if smartValves is None:
-            print("Room {} has no smartValves")
+            print("Room {} has no smartValves".format(scheduleRoomTest.get("Name")))
         else:
             print(
                 "Room {}, setpoint={}C, current temp={}C".format(
