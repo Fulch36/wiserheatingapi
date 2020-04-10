@@ -1,4 +1,5 @@
 wiserkeys.params
+**/__pycache__/
 *.pyc
 build
 dist
