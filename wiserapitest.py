@@ -45,9 +45,9 @@ try:
 
     for device in wh.getDevices():
         print(
-            "Device : Id {} Name {} Type {} , SignalStrength {}  ".format(
+            "Device : Id {} NodeId {:05.0f} Type {} , SignalStrength {}  ".format(
                 device.get("id"),
-                device.get("Name"),
+                device.get("NodeId"),
                 device.get("ProductType"),
                 device.get("DisplayedSignalStrength"),
             )
@@ -57,7 +57,7 @@ try:
     #
     scheduleRoomTest = 1
     print("--------------------------------")
-    print("Schedule for Room1 {}".format(wh.getRoomSchedule(scheduleRoomTest)))
+    print("Schedule for Room 1 {}".format(wh.getRoomSchedule(scheduleRoomTest)))
     print("--------------------------------")
 
     # Query Schedule for Room1

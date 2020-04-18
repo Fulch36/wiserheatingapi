@@ -23,14 +23,15 @@ _LOGGER = logging.getLogger(__name__)
 """
 Wiser Data URLS
 """
-WISERHUBURL = "http://{}/data/domain/"
-WISERNETWORKURL = "http://{}/data/network/"
-WISERMODEURL = "http://{}/data/domain/System/RequestOverride"
-WISERSETROOMTEMP = "http://{}//data/domain/Room/{}"
-WISERROOM = "http://{}//data/domain/Room/{}"
-WISERSCHEDULEURL = "http://{}/data/domain/Schedule/{}"
-WISERSMARTPLUGURL = "http://{}/data/domain/SmartPlug/{}"
-WISERSMARTPLUGSURL = "http://{}/data/domain/SmartPlug"
+WISERHUBURL = "http://{}/data/v2/domain/"
+WISERNETWORKURL = "http://{}/data/v2/network/"
+WISERMODEURL = "http://{}/data/v2/domain/System/RequestOverride"
+WISERSETROOMTEMP = "http://{}//data/v2/domain/Room/{}"
+WISERROOM = "http://{}//data/v2/domain/Room/{}"
+WISERSCHEDULEURL = "http://{}/data/v2/schedules/Heating/{}"
+WISERSCHEDULEGETURL = "http://{}/data/v2/schedules/"
+WISERSMARTPLUGURL = "http://{}/data/v2/domain/SmartPlug/{}"
+WISERSMARTPLUGSURL = "http://{}/data/v2/domain/SmartPlug"
 
 TEMP_MINIMUM = 5
 TEMP_MAXIMUM = 30
@@ -56,10 +57,6 @@ class WiserNoDevicesFound(Error):
 
 
 class WiserNotFound(Error):
-    pass
-
-
-class WiserNoRoosFound(Error):
     pass
 
 
@@ -97,6 +94,7 @@ class wiserHub:
         _LOGGER.info("WiserHub API Initialised : Version {}".format(__VERSION__))
         self.wiserHubData = None
         self.wiserNetworkData = None
+        self.wiserScheduleData = None
         self.hubIP = hubIP
         self.hubSecret = secret
         self.headers = {
@@ -194,13 +192,22 @@ class wiserHub:
                 _LOGGER.warning("Wiser found no rooms")
 
             # The Wiser Heat Hub can return invalid JSON, so remove all non-printable characters before trying to parse JSON
-            responseContent = requests.get(
-            WISERNETWORKURL.format(self.hubIP),
-            headers=self.headers,
-            timeout=TIMEOUT,
-            ).content
-            responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
-            self.wiserNetworkData = json.loads(responseContent)
+            if self.wiserNetworkData is None:
+                responseContent = requests.get(
+                WISERNETWORKURL.format(self.hubIP),
+                headers=self.headers,
+                timeout=TIMEOUT,
+                ).content
+                responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
+                self.wiserNetworkData = json.loads(responseContent)
+
+            if self.wiserScheduleData is None:
+                self.wiserScheduleData = requests.get(
+                WISERSCHEDULEGETURL.format(self.hubIP),
+                headers=self.headers,
+                timeout=TIMEOUT,
+                ).json()
+
 
         except requests.Timeout:
             _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
@@ -217,6 +224,10 @@ class wiserHub:
         except requests.ConnectionError:
             _LOGGER.debug("Connection error trying to update from Wiser Hub")
             raise
+
+        # Add v2 Schedule data to v2 Hub data so existing HA component will still work
+        self.wiserHubData['Schedule'] = self.wiserScheduleData['Heating']
+
         return self.wiserHubData
 
     def getHubData(self):
