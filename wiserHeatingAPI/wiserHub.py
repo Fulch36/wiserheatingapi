@@ -103,7 +103,7 @@ class wiserHub:
         }
         # Dict holding Valve2Room mapping convinience variable
         self.device2roomMap = {}
-        self.refreshData()  # Issue first refresh in init
+        #self.refreshData()  # Issue first refresh in init
 
     def __toWiserTemp(self, temp):
         """
@@ -146,6 +146,15 @@ class wiserHub:
         if self.wiserHubData is None:
             raise WiserHubDataNull("Hub data null even after refresh, aborting request")
         # Otherwise continue
+
+    def makeGetRequest(self, url):
+        try:
+            resp = requests.get(
+                url.format(self.hubIP), headers=self.headers, timeout=TIMEOUT
+            )
+
+            resp.raise_for_status()
+            return resp
 
     def refreshData(self):
         """
