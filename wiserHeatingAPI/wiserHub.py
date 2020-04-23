@@ -14,6 +14,8 @@ https://github.com/asantaga/wiserHomeAssistantPlatform
 
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 import json
 import os
 import re
@@ -33,11 +35,13 @@ WISERSCHEDULEGETURL = "http://{}/data/v2/schedules/"
 WISERSMARTPLUGURL = "http://{}/data/v2/domain/SmartPlug/{}"
 WISERSMARTPLUGSURL = "http://{}/data/v2/domain/SmartPlug"
 
-TEMP_MINIMUM = 5
+TEMP_MINIMUM = 5    
 TEMP_MAXIMUM = 30
 TEMP_OFF = -20
 
-TIMEOUT = (3.05, 6.5)
+TIMEOUT = (2.5, 2.5)
+RETRIES = 2
+BACKOFF = 1
 
 __VERSION__ = "1.0.7.2"
 
@@ -147,80 +151,29 @@ class wiserHub:
             raise WiserHubDataNull("Hub data null even after refresh, aborting request")
         # Otherwise continue
 
+    def requests_retry_session(
+        self,
+        retries=RETRIES,
+        backoff_factor=BACKOFF,
+        session=None,
+        ):
+        sesh = session or requests.Session()
+        retry = Retry(
+            total=retries,
+            backoff_factor=backoff_factor,
+        )
+        adapter = HTTPAdapter(max_retries = retry)
+        sesh.mount('http://', adapter)
+        return sesh
+
     def makeGetRequest(self, url):
         try:
-            resp = requests.get(
+            resp = self.requests_retry_session().get(
                 url.format(self.hubIP), headers=self.headers, timeout=TIMEOUT
             )
 
             resp.raise_for_status()
-            return resp
 
-    def refreshData(self):
-        """
-        Forces a refresh of data from the wiser hub
-        return: JSON Data
-        """
-
-        _LOGGER.info("Updating Wiser Hub Data")
-        try:
-            resp = requests.get(
-                WISERHUBURL.format(self.hubIP), headers=self.headers, timeout=TIMEOUT
-            )
-
-            resp.raise_for_status()
-            self.wiserHubData = resp.json()
-
-            _LOGGER.debug("Wiser Hub Data received {} ".format(self.wiserHubData))
-            if self.getRooms() is not None:
-                for room in self.getRooms():
-                    roomStatId = room.get("RoomStatId")
-                    if roomStatId is not None:
-                        # RoomStat found add it to the list
-                        self.device2roomMap[roomStatId] = {
-                            "roomId": room.get("id"),
-                            "roomName": room.get("Name"),
-                        }
-                    smartValves = room.get("SmartValveIds")
-                    if smartValves is not None:
-                        for valveId in smartValves:
-                            self.device2roomMap[valveId] = {
-                                "roomId": room.get("id"),
-                                "roomName": room.get("Name"),
-                            }
-                    # Show warning if room contains no devices.
-                    if roomStatId is None and smartValves is None:
-                        # No devices in room
-                        _LOGGER.warning(
-                            "Room {} doesn't contain any smart valves or thermostats.".format(
-                                room.get("Name")
-                            )
-                        )
-                _LOGGER.debug(" valve2roomMap{} ".format(self.device2roomMap))
-            else:
-                _LOGGER.warning("Wiser found no rooms")
-
-            # The Wiser Heat Hub can return invalid JSON, so remove all non-printable characters before trying to parse JSON
-            if self.wiserNetworkData is None:
-                responseContent = requests.get(
-                WISERNETWORKURL.format(self.hubIP),
-                headers=self.headers,
-                timeout=TIMEOUT,
-                ).content
-                responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
-                self.wiserNetworkData = json.loads(responseContent)
-
-            if self.wiserScheduleData is None:
-                self.wiserScheduleData = requests.get(
-                WISERSCHEDULEGETURL.format(self.hubIP),
-                headers=self.headers,
-                timeout=TIMEOUT,
-                ).json()
-
-
-        except requests.Timeout:
-            _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
-            raise WiserHubTimeoutException("The connection timed out.")
         except requests.HTTPError:
             if self.wiserHubData.status_code == 401:
                 raise WiserHubAuthenticationException(
@@ -230,14 +183,78 @@ class wiserHub:
                 raise WiserRESTException("Not Found.")
             else:
                 raise WiserRESTException("Unknown Error.")
-        except requests.ConnectionError:
-            _LOGGER.debug("Connection error trying to update from Wiser Hub")
-            raise
+
+        except (requests.Timeout, requests.ConnectionError) as ex:
+            _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
+            raise WiserHubTimeoutException("The connection timed out.")
+        
+        return resp
+
+    def makeScheduleDataRequest(self):
+        self.wiserScheduleData = self.makeGetRequest(url=WISERSCHEDULEGETURL).json()
+        return self.wiserScheduleData
+
+    def makeNetworkDataRequest(self):
+        responseContent = self.makeGetRequest(url=WISERNETWORKURL).content
+        responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
+        self.wiserNetworkData = json.loads(responseContent)
+        return self.wiserNetworkData
+
+    def makeHubDataRequest(self):
+        self.wiserHubData = self.makeGetRequest(url=WISERHUBURL).json()
+        return self.wiserNetworkData
+
+    def refreshData(self):
+        """
+        Forces a refresh of data from the wiser hub
+        return: JSON Data
+        """
+
+        _LOGGER.info("Updating Wiser Hub Data")
+
+        if self.wiserScheduleData is None:
+            self.makeScheduleDataRequest()
+
+        if self.wiserNetworkData is None:
+            self.makeNetworkDataRequest()
+
+        self.makeHubDataRequest()
+
+        _LOGGER.debug("Wiser Hub Data received {} ".format(self.wiserHubData))
+        if self.getRooms() is not None:
+            for room in self.getRooms():
+                roomStatId = room.get("RoomStatId")
+                if roomStatId is not None:
+                    # RoomStat found add it to the list
+                    self.device2roomMap[roomStatId] = {
+                        "roomId": room.get("id"),
+                        "roomName": room.get("Name"),
+                    }
+                smartValves = room.get("SmartValveIds")
+                if smartValves is not None:
+                    for valveId in smartValves:
+                        self.device2roomMap[valveId] = {
+                            "roomId": room.get("id"),
+                            "roomName": room.get("Name"),
+                        }
+                # Show warning if room contains no devices.
+                if roomStatId is None and smartValves is None:
+                    # No devices in room
+                    _LOGGER.warning(
+                        "Room {} doesn't contain any smart valves or thermostats.".format(
+                            room.get("Name")
+                        )
+                    )
+            _LOGGER.debug(" valve2roomMap{} ".format(self.device2roomMap))
+        else:
+            _LOGGER.warning("Wiser found no rooms")
+        
 
         # Add v2 Schedule data to v2 Hub data so existing HA component will still work
-        self.wiserHubData['Schedule'] = self.wiserScheduleData['Heating']
+        tempData = self.wiserHubData
+        tempData['Schedule'] = self.wiserScheduleData['Heating']
 
-        return self.wiserHubData
+        return tempData
 
     def getHubData(self):
         """
