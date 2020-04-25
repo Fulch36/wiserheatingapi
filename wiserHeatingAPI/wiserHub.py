@@ -15,7 +15,7 @@ https://github.com/asantaga/wiserHomeAssistantPlatform
 import logging
 import requests
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from requests.packages.urllib3.util.retry import Retry # pylint: disable=import-error
 import json
 import os
 import re
@@ -39,8 +39,8 @@ TEMP_MINIMUM = 5
 TEMP_MAXIMUM = 30
 TEMP_OFF = -20
 
-TIMEOUT = (2.5, 2.5)
-RETRIES = 2
+TIMEOUT = (1.5, 1.0)
+RETRIES = 3
 BACKOFF = 1
 
 __VERSION__ = "1.0.7.2"
@@ -160,9 +160,11 @@ class wiserHub:
         sesh = session or requests.Session()
         retry = Retry(
             total=retries,
+            read=retries,
+            connect=retries,
             backoff_factor=backoff_factor,
         )
-        adapter = HTTPAdapter(max_retries = retry)
+        adapter = HTTPAdapter(max_retries=retry)
         sesh.mount('http://', adapter)
         return sesh
 
@@ -174,19 +176,19 @@ class wiserHub:
 
             resp.raise_for_status()
 
-        except requests.HTTPError:
-            if self.wiserHubData.status_code == 401:
+        except requests.HTTPError as err:
+            if resp.status_code == 401:
                 raise WiserHubAuthenticationException(
                     "Authentication error.  Check secret key."
                 )
-            elif self.wiserHubData.status_code == 404:
-                raise WiserRESTException("Not Found.")
+            elif resp.status_code == 404:
+                raise WiserRESTException(err)
             else:
                 raise WiserRESTException("Unknown Error.")
 
         except (requests.Timeout, requests.ConnectionError) as ex:
             _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
-            raise WiserHubTimeoutException("The connection timed out.")
+            raise WiserHubTimeoutException("The error is {} The Exception is {}".format(ex,type(ex)))
         
         return resp
 
@@ -202,7 +204,7 @@ class wiserHub:
 
     def makeHubDataRequest(self):
         self.wiserHubData = self.makeGetRequest(url=WISERHUBURL).json()
-        return self.wiserNetworkData
+        return self.wiserHubData
 
     def refreshData(self):
         """
