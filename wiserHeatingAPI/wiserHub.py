@@ -16,6 +16,7 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry # pylint: disable=import-error
+from request_mod import CustomSession
 import json
 import os
 import re
@@ -25,15 +26,13 @@ _LOGGER = logging.getLogger(__name__)
 """
 Wiser Data URLS
 """
-WISERHUBURL = "http://{}/data/v2/domain/"
-WISERNETWORKURL = "http://{}/data/v2/network/"
-WISERMODEURL = "http://{}/data/v2/domain/System/RequestOverride"
-WISERSETROOMTEMP = "http://{}//data/v2/domain/Room/{}"
-WISERROOM = "http://{}//data/v2/domain/Room/{}"
-WISERSCHEDULEURL = "http://{}/data/v2/schedules/Heating/{}"
-WISERSCHEDULEGETURL = "http://{}/data/v2/schedules/"
-WISERSMARTPLUGURL = "http://{}/data/v2/domain/SmartPlug/{}"
+WISERSETROOMTEMP = "domain/Room/{}"
+WISERROOM = "domain/Room/{}"
+WISERSCHEDULEURL = "schedules/Heating/{}"
+WISERSMARTPLUGURL = "domain/SmartPlug/{}"
 WISERSMARTPLUGSURL = "http://{}/data/v2/domain/SmartPlug"
+
+WISERBASEURL = "http://{}/data/v2/"
 
 TEMP_MINIMUM = 5    
 TEMP_MAXIMUM = 30
@@ -41,14 +40,12 @@ TEMP_OFF = -20
 
 TIMEOUT = (1.5, 1.0)
 RETRIES = 3
-BACKOFF = 1
 
-__VERSION__ = "1.0.7.2"
+__VERSION__ = "1.0.8.0"
 
 """
 Exception Handlers
 """
-
 
 class Error(Exception):
     """Base class for exceptions in this module."""
@@ -85,6 +82,10 @@ class WiserHubAuthenticationException(Error):
     pass
 
 
+class WiserHubRequestException(Error):
+    pass
+
+
 class WiserHubTimeoutException(Error):
     pass
 
@@ -96,20 +97,19 @@ class WiserNoRoomsFound(Error):
 class wiserHub:
     def __init__(self, hubIP, secret):
         _LOGGER.info("WiserHub API Initialised : Version {}".format(__VERSION__))
+        self._http = CustomSession(
+            base_url=WISERBASEURL.format(hubIP),
+            hub_secret=secret,
+            timeout=TIMEOUT,
+            num_retries=RETRIES
+        )
         self.wiserHubData = None
         self.wiserNetworkData = None
         self.wiserScheduleData = None
-        self.hubIP = hubIP
-        self.hubSecret = secret
-        self.headers = {
-            "SECRET": self.hubSecret,
-            "Content-Type": "application/json;charset=UTF-8",
-        }
         # Dict holding Valve2Room mapping convinience variable
         self.device2roomMap = {}
-        #self.refreshData()  # Issue first refresh in init
 
-    def __toWiserTemp(self, temp):
+    def _toWiserTemp(self, temp):
         """
         Converts from temperature to wiser hub format
         param temp: The temperature to convert
@@ -118,16 +118,16 @@ class wiserHub:
         temp = int(temp * 10)
         return temp
 
-    def __fromWiserTemp(self, temp):
+    def _fromWiserTemp(self, temp):
         """
-        Conerts from wiser hub temperature format to decimal value
+        Converts from wiser hub temperature format to decimal value
         param temp: The wiser temperature to convert
         return: Float
         """
         temp = round(temp / 10, 1)
         return temp
 
-    def __checkTempRange(self, temp):
+    def _checkTempRange(self, temp):
         """
         Validates temperatures are within the allowed range for the wiser hub
         param temp: The temperature to check
@@ -138,89 +138,88 @@ class wiserHub:
         else:
             return True
 
+    def _makeGetRequest(self, url):
+        try:
+            resp = self._http.get(url=url)
+            return resp
+        except requests.HTTPError as ex:
+            if resp.status_code == 401:
+                raise WiserHubAuthenticationException("Authentication error. Check secret key.")
+            elif resp.status_code == 404:
+                raise WiserHubRequestException("Invalid request. Check URL endpoint.")
+            else:
+                raise WiserRESTException(ex)
+        except (requests.Timeout, requests.ConnectionError) as ex:
+            _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
+            raise WiserHubTimeoutException("The error is {} The Exception is {}".format(ex, type(ex)))
+
+    def _makePatchRequest(self, url, data):
+        try:
+            resp = self._http.patch(url=url, json=data)
+            return resp
+        except requests.HTTPError as ex:
+            if resp.status_code == 401:
+                raise WiserHubAuthenticationException("Authentication error. Check secret key.")
+            elif resp.status_code == 404 or 405:
+                raise WiserHubRequestException("Invalid request. Check URL endpoint and patch data.")
+            else:
+                raise WiserRESTException(ex)
+        except (requests.Timeout, requests.ConnectionError) as ex:
+            _LOGGER.debug("Connection timed out trying to send data to Wiser Hub")
+            raise WiserHubTimeoutException("The error is {} The Exception is {}".format(ex, type(ex)))
+
     def checkHubData(self):
         """
         Method checks the hub data object is populated, if it is not then it
         executes the refresh method, if the hubdata object is still null then
         it raises an error
-
         """
         if self.wiserHubData is None:
             self.refreshData()
         if self.wiserHubData is None:
             raise WiserHubDataNull("Hub data null even after refresh, aborting request")
         # Otherwise continue
-
-    def requests_retry_session(
-        self,
-        retries=RETRIES,
-        backoff_factor=BACKOFF,
-        session=None,
-        ):
-        sesh = session or requests.Session()
-        retry = Retry(
-            total=retries,
-            read=retries,
-            connect=retries,
-            backoff_factor=backoff_factor,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        sesh.mount('http://', adapter)
-        return sesh
-
-    def makeGetRequest(self, url):
-        try:
-            resp = self.requests_retry_session().get(
-                url.format(self.hubIP), headers=self.headers, timeout=TIMEOUT
-            )
-
-            resp.raise_for_status()
-
-        except requests.HTTPError as err:
-            if resp.status_code == 401:
-                raise WiserHubAuthenticationException(
-                    "Authentication error.  Check secret key."
-                )
-            elif resp.status_code == 404:
-                raise WiserRESTException(err)
-            else:
-                raise WiserRESTException("Unknown Error.")
-
-        except (requests.Timeout, requests.ConnectionError) as ex:
-            _LOGGER.debug("Connection timed out trying to update from Wiser Hub")
-            raise WiserHubTimeoutException("The error is {} The Exception is {}".format(ex,type(ex)))
         
-        return resp
-
-    def makeScheduleDataRequest(self):
-        self.wiserScheduleData = self.makeGetRequest(url=WISERSCHEDULEGETURL).json()
+    def updateScheduleData(self):
+        """
+        Gets the latest schedule data from the Wiser Hub
+        return: JSON Data
+        """
+        self.wiserScheduleData = self._makeGetRequest(url='schedules/').json()
         return self.wiserScheduleData
 
-    def makeNetworkDataRequest(self):
-        responseContent = self.makeGetRequest(url=WISERNETWORKURL).content
+    def updateNetworkData(self):
+        """
+        Gets the latest network data from the Wiser Hub
+        return: JSON Data
+        """
+        responseContent = self._makeGetRequest(url='network/').content
         responseContent = re.sub(rb"[^\x20-\x7F]+", b"", responseContent)
         self.wiserNetworkData = json.loads(responseContent)
         return self.wiserNetworkData
 
-    def makeHubDataRequest(self):
-        self.wiserHubData = self.makeGetRequest(url=WISERHUBURL).json()
+    def updateHubData(self):
+        """
+        Gets the latest data from the Wiser Hub
+        return: JSON Data
+        """
+        self.wiserHubData = self._makeGetRequest(url='domain/').json()
         return self.wiserHubData
 
     def refreshData(self):
         """
-        Forces a refresh of data from the wiser hub
+        Forces a refresh of data from the Wiser Hub
         return: JSON Data
         """
-
         _LOGGER.info("Updating Wiser Hub Data")
 
         if self.wiserScheduleData is None:
-            self.makeScheduleDataRequest()
+            self.updateScheduleData()
 
         if self.wiserNetworkData is None:
-            self.makeNetworkDataRequest()
+            self.updateNetworkData()
 
-        self.makeHubDataRequest()
+        self.updateHubData()
 
         _LOGGER.debug("Wiser Hub Data received {} ".format(self.wiserHubData))
         if self.getRooms() is not None:
@@ -251,7 +250,6 @@ class wiserHub:
         else:
             _LOGGER.warning("Wiser found no rooms")
         
-
         # Add v2 Schedule data to v2 Hub data so existing HA component will still work
         tempData = self.wiserHubData
         tempData['Schedule'] = self.wiserScheduleData['Heating']
@@ -260,9 +258,9 @@ class wiserHub:
 
     def getHubData(self):
         """
-        Retrieves the full JSON payload ,
-        for functions where I haven't provided a API yet
-
+        Retrieves the full JSON payload,
+        for functions where I haven't provided an API yet
+        
         returns : JSON Data
         """
         self.checkHubData()
@@ -317,7 +315,6 @@ class wiserHub:
         Convinience function to get hotwater data
 
         return: JSON with hotwater data
-
         """
         self.checkHubData()
         try:
@@ -382,7 +379,7 @@ class wiserHub:
         Returns heating relay status
         return:  On or Off
         """
-        # self.checkHubData()
+        # self.checkHubData() ????????????????
         heatingRelayStatus = "Off"
         # There could be multiple heating channels,
         heatingChannels = self.getHeatingChannels()
@@ -393,14 +390,12 @@ class wiserHub:
 
     def getHotwaterRelayStatus(self):
         """
-         Returns hotwater relay status
+        Returns hotwater relay status
+        
         return:  On or Off
-
         """
         self.checkHubData()
-        """
-        If there is no hotwater object then return false
-        """
+        # If there is no hotwater object then return false
         if not self.wiserHubData.get("HotWater"):
             return False
 
@@ -433,13 +428,13 @@ class wiserHub:
         if self.wiserHubData is None:
             self.refreshData()
         DHWId = self.wiserHubData.get("HotWater")[0].get("id")
-
-        _url = WISERHUBURL.format(self.hubIP) + "/HotWater/{}/".format(DHWId)
+        _url = "HotWater/{}/".format(DHWId)
         _LOGGER.debug(
             "Sending Patch Data: {}, to URL [{}]".format(modeMapping.get(_mode), _url)
         )
-        response = requests.patch(
-            url=_url, headers=self.headers, json=modeMapping.get(_mode)
+        response = self._http.patch(
+            url=_url,
+            json=modeMapping.get(_mode)
         )
         if response.status_code != 200:
             _LOGGER.debug("Set DHW Response code = {}".format(response.status_code))
@@ -459,14 +454,11 @@ class wiserHub:
         :return:
         """
         patchData = {switch: mode}
-        url = WISERHUBURL + "System"
 
         _LOGGER.debug("patchdata {} ".format(patchData))
-        response = requests.patch(
-            url=url.format(self.hubIP),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            url="System",
+            json=patchData
         )
         if response.status_code != 200:
             _LOGGER.debug(
@@ -534,11 +526,9 @@ class wiserHub:
 
         if scheduleId is not None:
             patchData = scheduleData
-            response = requests.patch(
-                url=WISERSCHEDULEURL.format(self.hubIP, scheduleId),
-                headers=self.headers,
-                json=patchData,
-                timeout=TIMEOUT,
+            response = self._http.patch(
+                url="schedules/Heating/{}".format(scheduleId),
+                json=patchData
             )
 
             if response.status_code != 200:
@@ -572,11 +562,9 @@ class wiserHub:
                     raise Exception("Error reading file {}".format(scheduleFile))
 
                 patchData = scheduleData
-                response = requests.patch(
-                    url=WISERSCHEDULEURL.format(self.hubIP, scheduleId),
-                    headers=self.headers,
-                    json=patchData,
-                    timeout=TIMEOUT,
+                response = self._http.patch(
+                    url="schedules/Heating/{}".format(scheduleId),
+                    json=patchData
                 )
 
                 if response.status_code != 200:
@@ -636,7 +624,7 @@ class wiserHub:
         if mode == "AWAY":
             if temperature is None:
                 raise ValueError("setAwayHome set to AWAY but not temperature set")
-            if not (self.__checkTempRange(temperature)):
+            if not (self._checkTempRange(temperature)):
                 raise ValueError(
                     "setAwayHome temperature can only be between {} and {} or {}(Off)".format(
                         TEMP_MINIMUM, TEMP_MAXIMUM, TEMP_OFF
@@ -645,15 +633,13 @@ class wiserHub:
         _LOGGER.info("Setting Home/Away : {}".format(mode))
 
         if mode == "AWAY":
-            patchData = {"type": 2, "setPoint": self.__toWiserTemp(temperature)}
+            patchData = {"type": 2, "setPoint": self._toWiserTemp(temperature)}
         else:
             patchData = {"type": 0, "setPoint": 0}
         _LOGGER.debug("patchdata {} ".format(patchData))
-        response = requests.patch(
-            url=WISERMODEURL.format(self.hubIP),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            url="System/RequestOverride",
+            json=patchData
         )
         if response.status_code != 200:
             _LOGGER.debug(
@@ -672,7 +658,7 @@ class wiserHub:
         param temperature:  The temperature in celcius from 5 to 30, -20 for Off
         """
         _LOGGER.info("Set Room {} Temperature to = {} ".format(roomId, temperature))
-        if not (self.__checkTempRange(temperature)):
+        if not (self._checkTempRange(temperature)):
             raise ValueError(
                 "SetRoomTemperature : value of temperature must be between {} and {} OR {} (off)".format(
                     TEMP_MINIMUM, TEMP_MAXIMUM, TEMP_OFF
@@ -681,14 +667,12 @@ class wiserHub:
         patchData = {
             "RequestOverride": {
                 "Type": "Manual",
-                "SetPoint": self.__toWiserTemp(temperature),
+                "SetPoint": self._toWiserTemp(temperature),
             }
         }
-        response = requests.patch(
-            WISERSETROOMTEMP.format(self.hubIP, roomId),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            url="domain/Room/{}".format(roomId),
+            json=patchData
         )
         if response.status_code != 200:
             _LOGGER.error(
@@ -740,13 +724,13 @@ class wiserHub:
                 "RequestOverride": {
                     "Type": "Manual",
                     "DurationMinutes": boost_temp_time,
-                    "SetPoint": self.__toWiserTemp(boost_temp),
+                    "SetPoint": self._toWiserTemp(boost_temp),
                     "Originator": "App",
                 }
             }
         elif mode.lower() == "manual":
             # When setting to manual , set the temp to the current scheduled temp
-            setTemp = self.__fromWiserTemp(
+            setTemp = self._fromWiserTemp(
                 self.getRoom(roomId).get("ScheduledSetPoint")
             )
             # If current scheduled temp is less than 5C then set to min temp
@@ -755,7 +739,7 @@ class wiserHub:
                 "Mode": "Manual",
                 "RequestOverride": {
                     "Type": "Manual",
-                    "SetPoint": self.__toWiserTemp(setTemp),
+                    "SetPoint": self._toWiserTemp(setTemp),
                 },
             }
         # Implement trv off as per https://github.com/asantaga/wiserheatingapi/issues/3
@@ -764,7 +748,7 @@ class wiserHub:
                 "Mode": "Manual",
                 "RequestOverride": {
                     "Type": "Manual",
-                    "SetPoint": self.__toWiserTemp(TEMP_OFF),
+                    "SetPoint": self._toWiserTemp(TEMP_OFF),
                 },
             }
         else:
@@ -785,11 +769,9 @@ class wiserHub:
                 }
             }
 
-            response = requests.patch(
-                WISERROOM.format(self.hubIP, roomId),
-                headers=self.headers,
-                json=cancelBoostPostData,
-                timeout=TIMEOUT,
+            response = self._http.patch(
+                "domain/Room/{}".format(roomId),
+                json=cancelBoostPostData
             )
             if response.status_code != 200:
                 _LOGGER.error(
@@ -798,11 +780,9 @@ class wiserHub:
                 raise WiserRESTException("Error cancelling boost {} ".format(mode))
 
         # Set new mode
-        response = requests.patch(
-            WISERROOM.format(self.hubIP, roomId),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            "domain/Room/{}".format(roomId),
+            json=patchData
         )
         if response.status_code != 200:
             _LOGGER.error(
@@ -855,15 +835,12 @@ class wiserHub:
             _LOGGER.error("SmartPlug State must be either On or Off")
             raise ValueError("SmartPlug State must be either On or Off")
 
-        url = WISERSMARTPLUGURL.format(self.hubIP, smartPlugId)
         patchData = {"RequestOutput": smartPlugState.title()}
 
         _LOGGER.debug("Setting smartplug status patchdata {} ".format(patchData))
-        response = requests.patch(
-            url=url.format(self.hubIP),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            url="domain/SmartPlug/{}".format(smartPlugId),
+            json=patchData
         )
         if response.status_code != 200:
             if response.status_code == 404:
@@ -898,15 +875,12 @@ class wiserHub:
             _LOGGER.error("SmartPlug Mode must be either Auto or Manual")
             raise ValueError("SmartPlug Mode must be either Auto or Manual")
 
-        url = WISERSMARTPLUGURL.format(self.hubIP, smartPlugId)
         patchData = {"Mode": smartPlugMode.title()}
 
         _LOGGER.debug("Setting smartplug status patchdata {} ".format(patchData))
-        response = requests.patch(
-            url=url.format(self.hubIP),
-            headers=self.headers,
-            json=patchData,
-            timeout=TIMEOUT,
+        response = self._http.patch(
+            url="domain/SmartPlug/{}".format(smartPlugId),
+            json=patchData
         )
         if response.status_code != 200:
             if response.status_code == 404:
